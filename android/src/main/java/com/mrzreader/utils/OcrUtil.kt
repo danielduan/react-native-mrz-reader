@@ -201,12 +201,20 @@ class OcrUtil {
           val chkdocumentNumber = line2.substring(9, 10)[0]
           val chkdateOfBirthDay = line2.substring(19, 20)[0]
           val chkexpiryDate = line2.substring(27, 28)[0]
+          val chkfinal = line2.substring(43, 44)[0]
           val valdocumentNumber = MRZInfo.checkDigit(documentNumber)
           val valdateOfBirthDay = MRZInfo.checkDigit(dateOfBirthDay)
           val valexpiryDate = MRZInfo.checkDigit(expiryDate)
+          val finalChecksumSource = (
+            line2.substring(0, 10) + // document number + its check
+              line2.substring(13, 20) + // birth date + its check
+              line2.substring(21, 43) // expiry date + its check + optional data + optional check
+              )
+          val valfinal = MRZInfo.checkDigit(finalChecksumSource)
           val comparedocumentNumber = chkdocumentNumber.compareTo(valdocumentNumber)
           val comparedateOfBirthDay = chkdateOfBirthDay.compareTo(valdateOfBirthDay)
           val compareexpiryDate = chkexpiryDate.compareTo(valexpiryDate)
+          val comparefinal = chkfinal.compareTo(valfinal)
           var isValidMrz = true
           if (comparedocumentNumber != 0) {
             isValidMrz = false
@@ -215,6 +223,9 @@ class OcrUtil {
             isValidMrz = false
           }
           if (compareexpiryDate != 0) {
+            isValidMrz = false
+          }
+          if (comparefinal != 0) {
             isValidMrz = false
           }
           //---------------------
@@ -245,9 +256,10 @@ class OcrUtil {
     private const val ID_CARD_TD_1_LINE_2_REGEX =
       "([0-9]{6})([0-9]{1})([M|F|X|<]{1})([0-9]{6})([0-9]{1})([A-Z]{3})([A-Z0-9<]{11})([0-9]{1})" // 30 total
     private const val ID_CARD_TD_1_LINE_3_REGEX = "([A-Z0-9<]{30})"
-    private const val PASSPORT_TD_3_LINE_1_REGEX = "(P[A-Z0-9<]{1})([A-Z]{3})([A-Z0-9<]{39})"
+    // Issuing state + nationality allow `<` filler (e.g. Germany `D<<`) per ICAO 9303 TD3.
+    private const val PASSPORT_TD_3_LINE_1_REGEX = "(P[A-Z0-9<]{1})([A-Z<]{3})([A-Z0-9<]{39})"
     private const val PASSPORT_TD_3_LINE_2_REGEX =
-      "([A-Z0-9<]{9})([0-9]{1})([A-Z]{3})([0-9]{6})([0-9]{1})([M|F|X|<]{1})([0-9]{6})([0-9]{1})([A-Z0-9<]{14})([0-9]{1})([0-9]{1})"
+      "([A-Z0-9<]{9})([0-9]{1})([A-Z<]{3})([0-9]{6})([0-9]{1})([M|F|X|<]{1})([0-9]{6})([0-9]{1})([A-Z0-9<]{14})([0-9]{1})([0-9]{1})"
   }
 
 
