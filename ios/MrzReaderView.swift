@@ -6,8 +6,6 @@ import Vision
 @objc(MrzReaderView)
 class MrzReaderView: MrzReaderViewBase {
 	var request: VNRecognizeTextRequest!
-	// Temporal string tracker
-	let mrzTracker = MrzStringTracker()
 
   override func fakeViewDidLoad() {
 		// Set up vision request before letting ViewController set up the camera
@@ -21,49 +19,36 @@ class MrzReaderView: MrzReaderViewBase {
 	
 	// Vision recognition handler.
 	func recognizeTextHandler(request: VNRequest, error: Error?) {
-		var redBoxes = [CGRect]() // Shows all recognized text lines
-		var greenBoxes = [CGRect]() // Shows words that might be serials
-        var codes = [String]()
+		var recognizedStrings = [String]()
 
 		guard let results = request.results as? [VNRecognizedTextObservation] else {
 			return
 		}
 		
-		let maximumCandidates = 1
+		let maximumCandidates = 10
 		for visionResult in results {
-            guard let candidate = visionResult.topCandidates(maximumCandidates).first else { continue }
-			
-			var numberIsSubstring = true
-
-			if let result = candidate.string.checkMrz() {
-                if(result != "nil"){
-                    codes.append(result)
-                    numberIsSubstring = false
-
-                    greenBoxes.append(visionResult.boundingBox)
-                }
-			}
-
-			if numberIsSubstring {
-				redBoxes.append(visionResult.boundingBox)
+			for candidate in visionResult.topCandidates(maximumCandidates) {
+				recognizedStrings.append(candidate.string)
 			}
 		}
 		
-		// Log any found numbers.
-        mrzTracker.logFrame(strings: codes)
-		show(boxGroups: [(color: UIColor.red.cgColor, boxes: redBoxes), (color: UIColor.green.cgColor, boxes: greenBoxes)])
-		
-		// Check if we have any temporally stable numbers.
-		if let sureNumber = mrzTracker.getStableString() {
-			showString(string: sureNumber)
-			mrzTracker.reset(string: sureNumber)
+		// Hide debug bounding boxes in production scanning UI.
+		DispatchQueue.main.async {
+			self.removeBoxes()
 		}
+		
+		// Build and validate TD3 MRZ from this frame only.
+		guard let mrzString = parseTd3Mrz(from: recognizedStrings) else {
+			return
+		}
+		showString(string: mrzString)
 	}
 	
 	override func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
 		if let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
 			// Configure for running in real-time.
 			request.recognitionLevel = .fast
+			request.recognitionLanguages = ["en-US"]
 			// Language correction won't help recognizing phone numbers. It also
 			// makes recognition slower.
 			request.usesLanguageCorrection = false
@@ -75,45 +60,6 @@ class MrzReaderView: MrzReaderViewBase {
 				try requestHandler.perform([request])
 			} catch {
 				print(error)
-			}
-		}
-	}
-	
-	// MARK: - Bounding box drawing
-	
-	// Draw a box on screen. Must be called from main queue.
-	var boxLayer = [CAShapeLayer]()
-	func draw(rect: CGRect, color: CGColor) {
-		let layer = CAShapeLayer()
-		layer.opacity = 0.5
-		layer.borderColor = color
-		layer.borderWidth = 1
-		layer.frame = rect
-		boxLayer.append(layer)
-		previewLayer.insertSublayer(layer, at: 1)
-	}
-	
-	// Remove all drawn boxes. Must be called on main queue.
-	func removeBoxes() {
-		for layer in boxLayer {
-			layer.removeFromSuperlayer()
-		}
-		boxLayer.removeAll()
-	}
-	
-	typealias ColoredBoxGroup = (color: CGColor, boxes: [CGRect])
-	
-	// Draws groups of colored boxes.
-	func show(boxGroups: [ColoredBoxGroup]) {
-		DispatchQueue.main.async {
-			let layer = self.previewLayer
-			self.removeBoxes()
-			for boxGroup in boxGroups {
-				let color = boxGroup.color
-				for box in boxGroup.boxes {
-          let rect = layer!.layerRectConverted(fromMetadataOutputRect: box.applying(self.visionToAVFTransform))
-					self.draw(rect: rect, color: color)
-				}
 			}
 		}
 	}
@@ -156,6 +102,8 @@ class MrzReaderViewBase: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
 	
 	// Vision -> AVF coordinate transform.
 	var visionToAVFTransform = CGAffineTransform.identity
+	// Debug bounding boxes are intentionally disabled in this app.
+	var boxLayer = [CAShapeLayer]()
 
   // MARK: - View controller methods
 
@@ -220,21 +168,8 @@ class MrzReaderViewBase: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
   	// MARK: - Setup
 	
 	func calculateRegionOfInterest() {
-		// In landscape orientation the desired ROI is specified as the ratio of
-		// buffer width to height. When the UI is rotated to portrait, keep the
-		// vertical size the same (in buffer pixels). Also try to keep the
-		// horizontal size the same up to a maximum ratio.
-		let desiredHeightRatio = 0.15
-		let desiredWidthRatio = 0.6
-		let maxPortraitWidth = 0.8
-		
-		// Figure out size of ROI.
-		let size: CGSize
-		if currentOrientation.isPortrait || currentOrientation == .unknown {
-			size = CGSize(width: min(desiredWidthRatio * bufferAspectRatio, maxPortraitWidth), height: desiredHeightRatio / bufferAspectRatio)
-		} else {
-			size = CGSize(width: desiredWidthRatio, height: desiredHeightRatio)
-		}
+		// Fixed ROI: full width and quarter height (normalized coordinates).
+		let size = CGSize(width: 1.0, height: 0.25)
 		// Make it centered.
 		regionOfInterest.origin = CGPoint(x: (1 - size.width) / 2, y: (1 - size.height) / 2)
 		regionOfInterest.size = size
@@ -327,13 +262,10 @@ class MrzReaderViewBase: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
     if captureSession.canAddOutput(videoDataOutput) {
       captureSession.addOutput(videoDataOutput)
       // NOTE:
-      // There is a trade-off to be made here. Enabling stabilization will
-      // give temporally more stable results and should help the recognizer
-      // converge. But if it's enabled the VideoDataOutput buffers don't
-      // match what's displayed on screen, which makes drawing bounding
-      // boxes very hard. Disable it in this app to allow drawing detected
-      // bounding boxes on screen.
-      videoDataOutput.connection(with: AVMediaType.video)?.preferredVideoStabilizationMode = .off
+      // Enable stabilization for sharper OCR frames, especially in low light.
+      // Debug bounding boxes are disabled, so the previous overlay trade-off
+      // no longer applies.
+      videoDataOutput.connection(with: AVMediaType.video)?.preferredVideoStabilizationMode = .auto
     } else {
       print("Could not add VDO output")
       return
@@ -342,7 +274,7 @@ class MrzReaderViewBase: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
     // Set zoom and autofocus to help focus on very small text.
     do {
       try captureDevice.lockForConfiguration()
-            captureDevice.videoZoomFactor = 1.5
+            captureDevice.videoZoomFactor = 1.0
       captureDevice.autoFocusRangeRestriction = .near
       captureDevice.unlockForConfiguration()
     } catch {
@@ -354,6 +286,14 @@ class MrzReaderViewBase: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
   }
 
   // MARK: - UI drawing and interaction
+	
+	// Remove all drawn boxes. Must be called on main queue.
+	func removeBoxes() {
+		for layer in boxLayer {
+			layer.removeFromSuperlayer()
+		}
+		boxLayer.removeAll()
+	}
 	
 	func showString(string: String) {
     DispatchQueue.main.async {

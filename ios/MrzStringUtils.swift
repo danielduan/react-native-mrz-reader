@@ -7,11 +7,9 @@ Utilities for dealing with recognized strings
 
 import Foundation
 
-var captureFirst = ""
-var captureSecond = ""
-var captureThird = ""
-var mrz = ""
-var temp_mrz = ""
+private let tdThreeFirstRegex = "P.[A-Z0<]{3}([A-Z0]+<)+<([A-Z0]+<)+<+"
+private let tdThreeSecondRegex = "[A-Z0-9]{1,9}<?[0-9O]{1}[A-Z0<]{3}[0-9]{7}(M|F|<)[0-9O]{7}[A-Z0-9<]+"
+private let tdThreeMrzRegex = "P.[A-Z0<]{3}([A-Z0]+<)+<([A-Z0]+<)+<+\n[A-Z0-9]{1,9}<?[0-9O]{1}[A-Z0<]{3}[0-9]{7}(M|F|<)[0-9O]{7}[A-Z0-9<]+"
 
 func calcCheckDigit(_ value: String) -> String {
   let uppercaseLetters = CharacterSet.uppercaseLetters
@@ -77,27 +75,8 @@ func validateMRZ(_ mrz: String) -> Bool {
     // print("fail expdate check: " + expiryDateWithCheck)
     return false
   }
-  if (String(optionalDataWithCheck.prefix(14)).allSatisfy { $0 == "<" }) {
-    /* When the personal number field is not
-     used, the character positions 29 to 42
-     in the second MRZ line should be
-     completed with filler characters (<)
-     (see also under “check digit”, character
-     position 43 below).*/
-    if let lastCharacter = optionalDataWithCheck.last,
-       lastCharacter != "<" && lastCharacter != "0" {
-      /* When the personal number field is not
-       used and filler characters (<) are used
-       in positions 29 to 42, the check digit
-       may be zero or the filler character (<) at
-       the option of the issuing State or
-       organization. */
-        return false
-    }
-  } else if (calcCheckDigit(String(optionalDataWithCheck.prefix(14))) != String(optionalDataWithCheck.suffix(1))) {
-    // print("fail optdata check: " + optionalDataWithCheck)
-    return false
-  }
+  // We intentionally verify the 4 TD3 checksums:
+  // document number, birth date, expiry date, and final/composite.
   if (calcCheckDigit(String(secondLineWithCheck.prefix(39))) != String(secondLineWithCheck.suffix(1))) {
     // print("fail line check: " + secondLineWithCheck)
     return false
@@ -106,118 +85,43 @@ func validateMRZ(_ mrz: String) -> Bool {
 }
 
 extension String {
-
-	func checkMrz() -> (String)? {
-        
-    let tdThreeFirstRegex = "P.[A-Z0<]{3}([A-Z0]+<)+<([A-Z0]+<)+<+"
-    let tdThreeSecondRegex = "[A-Z0-9]{1,9}<?[0-9O]{1}[A-Z0<]{3}[0-9]{7}(M|F|<)[0-9O]{7}[A-Z0-9<]+"
-    let tdThreeMrzRegex = "P.[A-Z0<]{3}([A-Z0]+<)+<([A-Z0]+<)+<+\n[A-Z0-9]{1,9}<?[0-9O]{1}[A-Z0<]{3}[0-9]{7}(M|F|<)[0-9O]{7}[A-Z0-9<]+"
-
-    let tdThreeFirstLine = self.range(of: tdThreeFirstRegex, options: .regularExpression, range: nil, locale: nil)
-    let tdThreeSeconddLine = self.range(of: tdThreeSecondRegex, options: .regularExpression, range: nil, locale: nil)
-    
-
-    if(tdThreeFirstLine != nil){
-      if(self.count == 44){
-        captureFirst = self
-      }
-    }
-    
-    if(tdThreeSeconddLine != nil){
-      if(self.count == 44){
-        captureSecond = self
-      }
-    }
-    
-    if(captureFirst.count == 44 && captureSecond.count == 44){
-      temp_mrz = (captureFirst.stripped + "\n" + captureSecond.stripped).replacingOccurrences(of: " ", with: "<")
-      
-      let checkMrz = temp_mrz.range(of: tdThreeMrzRegex, options: .regularExpression, range: nil, locale: nil)
-      if(checkMrz != nil){
-        mrz = temp_mrz
-      }
-    }
-
-    if(mrz == ""){
-      return nil
-    }
-
-    if (!validateMRZ(mrz)) {
-      return nil
-    }
-      
-		return mrz
-	}
-    
   var stripped: String {
     let okayChars = Set("ABCDEFGHIJKLKMNOPQRSTUVWXYZ1234567890<")
     return self.filter {okayChars.contains($0) }
   }
 }
 
-class MrzStringTracker {
-	var frameIndex: Int64 = 0
+func parseTd3Mrz(from strings: [String]) -> String? {
+  var firstLine: String?
+  var secondLine: String?
 
-	typealias StringObservation = (lastSeen: Int64, count: Int64)
-	
-	// Dictionary of seen strings. Used to get stable recognition before
-	// displaying anything.
-	var seenStrings = [String: StringObservation]()
-	var bestCount = Int64(0)
-	var bestString = ""
+  for string in strings {
+    let normalized = string.uppercased().stripped
 
-	func logFrame(strings: [String]) {
-		for string in strings {
-			if seenStrings[string] == nil {
-				seenStrings[string] = (lastSeen: Int64(0), count: Int64(-1))
-			}
-			seenStrings[string]?.lastSeen = frameIndex
-			seenStrings[string]?.count += 1
-			// print("Seen \(string) \(seenStrings[string]?.count ?? 0) times")
-		}
-	
-		var obsoleteStrings = [String]()
+    if firstLine == nil,
+       let firstMatchRange = normalized.range(of: tdThreeFirstRegex, options: .regularExpression, range: nil, locale: nil) {
+      let candidate = String(normalized[firstMatchRange])
+      if candidate.count == 44 {
+        firstLine = candidate
+      }
+    }
 
-		// Go through strings and prune any that have not been seen in while.
-		// Also find the (non-pruned) string with the greatest count.
-		for (string, obs) in seenStrings {
-			// Remove previously seen text after 30 frames (~1s).
-			if obs.lastSeen < frameIndex - 30 {
-				obsoleteStrings.append(string)
-			}
-			
-			// Find the string with the greatest count.
-			let count = obs.count
-			if !obsoleteStrings.contains(string) && count > bestCount {
-				bestCount = Int64(count)
-				bestString = string
-			}
-		}
-		// Remove old strings.
-		for string in obsoleteStrings {
-			seenStrings.removeValue(forKey: string)
-		}
-		
-		frameIndex += 1
-	}
-	
-	func getStableString() -> String? {
-		// Require the recognizer to see the same string at least 10 times.
-		if bestCount >= 10 {
-			return bestString
-		} else {
-			return nil
-		}
-	}
-	
-	func reset(string: String) {
-		seenStrings.removeValue(forKey: string)
-		bestCount = 0
-		bestString = ""
-        captureFirst = ""
-        captureSecond = ""
-        captureThird = ""
-        mrz = ""
-        temp_mrz = ""
-	}
+    if secondLine == nil,
+       let secondMatchRange = normalized.range(of: tdThreeSecondRegex, options: .regularExpression, range: nil, locale: nil) {
+      let candidate = String(normalized[secondMatchRange])
+      if candidate.count == 44 {
+        secondLine = candidate
+      }
+    }
+
+    guard let first = firstLine, let second = secondLine else { continue }
+
+    let combined = "\(first)\n\(second)"
+    let looksLikeTd3 = combined.range(of: tdThreeMrzRegex, options: .regularExpression, range: nil, locale: nil) != nil
+    if looksLikeTd3 && validateMRZ(combined) {
+      return combined
+    }
+  }
+
+  return nil
 }
